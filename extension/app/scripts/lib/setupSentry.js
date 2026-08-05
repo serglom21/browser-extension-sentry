@@ -10,14 +10,12 @@ import { createTransport } from '@sentry/core';
  * emit the W3C header itself, naming each request's own span, which is why the
  * hand-rolled `sentry-trace-propagation.ts` could be deleted outright.
  *
- * BUG B is untouched and still fully present:
+ * BUG B is fixed on this branch too, by two changes in the upstream code — neither
+ * of which required the SDK upgrade:
  *
- *   - `shared/lib/trace.ts` still falls back to `getActiveSpan()` (B.1)
- *   - there is still no `Sentry.flush()` and no `chrome.runtime.onSuspend`
- *     listener anywhere (B.2)
- *
- * That is the point of this branch: the upgrade fixes Bug A's manifestation of the
- * anti-pattern and does nothing for Bug B's.
+ *   - B.1: `shared/lib/trace.ts` now gates the `getActiveSpan()` fallback behind an
+ *     explicit `allowActiveSpanFallback` opt-in.
+ *   - B.2: `app/scripts/background.js` now calls `Sentry.flush()` on teardown.
  */
 
 export const ENVELOPE_SINK_URL = 'http://localhost:4000/__envelope';
@@ -140,7 +138,7 @@ export function setupSentry() {
     ],
   });
 
-  console.log('[repro] Sentry initialised — @sentry/browser 10.38.0 (Bug A fixed, Bug B live)');
+  console.log('[repro] Sentry initialised — @sentry/browser 10.38.0 (both bugs fixed)');
 }
 
 /**

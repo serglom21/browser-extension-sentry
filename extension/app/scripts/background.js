@@ -59,6 +59,7 @@ async function runTransaction() {
     log('Transaction started —', describeParent(span));
     await sleep(2000);
     log('Transaction ended');
+    scheduleFlush();
   });
 }
 
@@ -71,6 +72,7 @@ async function runWalletAlignment() {
   return trace({ name: TraceName.WalletAlignment }, async (span) => {
     log('Wallet Alignment tick —', describeParent(span));
     await sleep(150);
+    scheduleFlush();
   });
 }
 
@@ -88,6 +90,7 @@ async function runBridgeQuotesFetched() {
     } catch (error) {
       log('BridgeQuotesFetched failed — is the backend running?', error.message);
     }
+    scheduleFlush();
   });
 }
 
@@ -464,8 +467,10 @@ async function runDemo() {
  * of waiting for Chrome's ~30s idle timeout. Anything still batched in the transport
  * at this moment is what the missing flush() would have rescued.
  */
-function terminateWorker() {
-  log('=== terminating service worker (no flush) ===');
+async function terminateWorker() {
+  log('=== terminating service worker (flushing first) ===');
+  // This is the rescue: without it the batched envelopes are simply lost.
+  await flushNow('terminate');
   chrome.runtime.reload();
 }
 
@@ -503,13 +508,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-// Exposed for driving the demo from the service worker console.
+/**
+ * BUG B.2's fix — get pending spans out of the transport before the worker dies.
+ *
+ * `Sentry.flush` was available even on 8.33.1; the upstream project simply never called it
+ * anywhere, so whatever the transport still had batched died with the worker.
+ */
+async function flushNow(reason) {
+  const delivered = await Sentry.flush(2000);
+  log(`flush(${reason}) -> ${delivered ? 'delivered' : 'timed out'}`);
+  return delivered;
+}
+
+/**
+ * The `chrome.runtime.onSuspend` listener the write-up specifies.
+ *
+ * MEASURED FINDING, Chrome 150 / MV3: this never runs. `chrome.runtime.onSuspend`
+ * exists and `addListener` succeeds — so the code passes review and looks correct —
+ * but Chrome does not deliver the event to a service worker. Verified by persisting a
+ * marker here and reading it back after Chrome terminated the worker on its own ~30s
+ * idle timeout: `chrome.storage.local` was empty.
+ *
+ * onSuspend is an MV2 event-page signal. MV3 workers are killed without warning, so
+ * there is no teardown hook to flush from. It is kept here because it is harmless and
+ * is what the write-up asks for, but it must not be the only mechanism.
+ */
+chrome.runtime.onSuspend?.addListener(() => {
+  log('onSuspend fired');
+  chrome.storage.local.set({ onSuspendFiredAt: Date.now() });
+  flushNow('onSuspend');
+});
+
+// The debounced flush that actually works in MV3 — flush shortly after operations go
+// quiet, rather than waiting for a teardown event that never comes — is declared once,
+// alongside the flush-rescue diagnostic above, and reused here.
+
 self.__runDemo = runDemo;
 self.__importItem = handleImport;
 self.__runConcurrencyTest = runConcurrencyTest;
 self.__runFlushRescueTest = runFlushRescueTest;
 self.__readFlushDiag = readFlushDiag;
 self.__terminateWorker = terminateWorker;
+self.__flushNow = flushNow;
 
 runBootFetches();
 markBackgroundInitialized();

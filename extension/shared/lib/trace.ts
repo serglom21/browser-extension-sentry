@@ -56,6 +56,17 @@ export type SerializedTraceContext = {
 export type TraceCallback<T> = (context?: TraceContext) => T;
 
 export type TraceRequest = {
+  /**
+   * Opt in to inheriting the ambient active span when no explicit parent is given.
+   *
+   * BUG B.1's fix. Previously this behaviour was the silent default, so a call site
+   * that wanted a real root and a call site that had simply forgotten to pass a
+   * parent were indistinguishable. Making it an explicit, named option means every
+   * call site that relies on it has to say so — which is exactly what would have
+   * surfaced `Wallet Alignment` and the quote fetch as needing review.
+   */
+  allowActiveSpanFallback?: boolean;
+
   data?: Record<string, number | string | boolean>;
   id?: string;
   name: TraceName | `${'Background RPC' | 'Messenger Call'}: ${string}`;
@@ -207,22 +218,32 @@ function startSpan<T>(
   request: TraceRequest,
   callback: (spanOptions: Sentry.StartSpanOptions) => T,
 ) {
-  const { data: attributes, name, parentContext, startTime, op } = request;
+  const {
+    data: attributes,
+    name,
+    parentContext,
+    startTime,
+    op,
+    allowActiveSpanFallback,
+  } = request;
   let parentSpan = resolveParentSpan(parentContext);
 
   // Inherit from active span (e.g. browserTracingIntegration's pageload/navigation)
-  // when no explicit parent is provided. Must capture before withIsolationScope
-  // severs the active span context chain.
-  // forceTransaction preserves transaction-level visibility for monitoring while
-  // linking to the auto-instrumentation hierarchy.
+  // ONLY when the caller has explicitly opted in. Must capture before
+  // withIsolationScope severs the active span context chain.
   //
-  // ^ That comment is the upstream, verbatim. It is also the bug: for anything
-  // driven by a timer, a poll or a messenger call, "the active span" is an unrelated
-  // long-lived root -- in a service worker, the pageload idle span -- so the
-  // operation is force-promoted to a transaction hanging off something it has no
-  // relationship to. When that root is never flushed, the operation is orphaned.
+  // BUG B.1's fix is the added `allowActiveSpanFallback` condition. Without it this
+  // block ran for every call with no explicit parent, so timer- and poll-driven
+  // operations silently adopted whatever unrelated long-lived root happened to be
+  // active — in a service worker, the pageload idle span. They were then
+  // force-promoted to transactions hanging off it, and orphaned outright whenever
+  // that root was never flushed.
+  //
+  // Now a caller must either pass a real `parentContext` or say
+  // `allowActiveSpanFallback: true`. Anything that does neither becomes its own root,
+  // which for a poll is the correct answer.
   let forceTransaction: boolean | undefined;
-  if (!parentSpan && !parentContext) {
+  if (!parentSpan && !parentContext && allowActiveSpanFallback) {
     const activeSpan = sentryGetActiveSpan();
     if (activeSpan) {
       parentSpan = activeSpan;
