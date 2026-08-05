@@ -33,6 +33,44 @@ Measured on identical 15s runs:
 
 ---
 
+## Before / after: captured traces
+
+Three runs of the identical 15s workload, one per branch. Each produced **19
+transactions**, so the counts are matched and the only differences are structural.
+
+| Branch | Trace in Sentry | Offline fixture |
+| --- | --- | --- |
+| `main` — both bugs | [`c4c2dcad…`](https://snout-and-about.sentry.io/explore/traces/trace/c4c2dcada8a149e0b8c9238a0067924b) | `demo/fixtures/01-main-both-bugs.jsonl` |
+| `fix/sentry-v10-upgrade` — Bug A fixed | [`c0446dc4…`](https://snout-and-about.sentry.io/explore/traces/trace/c0446dc4772c4ee49e8400a6d3f5db49) | `demo/fixtures/02-v10-upgrade-bugA-fixed.jsonl` |
+| `fix/centralized-parenting` — both fixed | [`19e1a288…`](https://snout-and-about.sentry.io/explore/traces/trace/19e1a288d8814b2cbbad917a78eca147) | `demo/fixtures/03-fixed-both-bugs.jsonl` |
+
+What each run measured:
+
+| | `main` | `v10-upgrade` | `fixed` |
+| --- | --- | --- | --- |
+| Backend spans sibling-attached | **8 / 8** | 0 / 8 | 0 / 8 |
+| Misattached spans | **8** | **8** | **0** |
+| Operations as own root | **0 / 10** | **0 / 10** | **10 / 10** |
+| Largest root subtree | 18 txns / 28.4s | 18 txns / 20.3s | 3 txns / 0.4s |
+
+The fixtures are the durable copy — the Sentry links lose full fidelity after the 30-day
+retention boundary, and re-running overwrites `demo/captured-spans.jsonl`. Read any
+fixture without rebuilding or reloading anything:
+
+```bash
+node demo/print-trace-tree.js --file demo/fixtures/01-main-both-bugs.jsonl
+node demo/print-trace-tree.js --file demo/fixtures/03-fixed-both-bugs.jsonl
+```
+
+That side-by-side is the fastest way to show the whole story, and it works with no
+Chrome, no backend and no network.
+
+One honest note on the last row: the `pageload` span itself is **not** addressed by
+either Bug B fix, so it still runs to `finalTimeout` on all three branches and the
+printer still labels its subtree a mega-trace on the fixed branch. What changes is what
+it contains — 18 unrelated transactions over 28.4s, down to 3 boot fetches over 0.4s.
+Bounding that span is separate work, tracked as the trace-id-persistence finding below.
+
 ## Setup
 
 Node 18+ and Chrome. **Rebuild after every branch switch** — Chrome loads the bundle,
