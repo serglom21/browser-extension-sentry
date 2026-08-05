@@ -6,7 +6,6 @@ import {
   markBackgroundInitialized,
   transportStats,
 } from './lib/setupSentry.js';
-import { getCurrentTraceparent } from './lib/sentry-trace-propagation.ts';
 import { trace, endTrace, TraceName } from '../../shared/lib/trace.ts';
 
 setupSentry();
@@ -28,28 +27,23 @@ function describeParent(span) {
 }
 
 // ---------------------------------------------------------------------------
-// BUG A — background boot fetches.
-//
-// These are plain background requests, not wrapped in trace(): exactly how
-// the upstream boot-time calls work. The hand-rolled traceparent helper therefore
-// resolves `getActiveSpan()` to the ambient pageload span, so each request advertises
-// *pageload* as its parent. The backend then parents its server span to pageload —
-// making it a direct SIBLING of the http.client span that triggered it.
-//
-// These are the three endpoints from the confirmed production example, trace
+// Background boot fetches — the three endpoints from confirmed production trace
 // a confirmed production trace.
+//
+// BUG A is fixed here. No header is set by hand any more: the SDK's own fetch
+// instrumentation attaches `sentry-trace`, `baggage` and — via
+// `propagateTraceparent` — the W3C `traceparent`, all naming *this request's own*
+// http.client span. The backend's server span therefore nests under the request
+// that triggered it instead of beside it.
 // ---------------------------------------------------------------------------
 
 const BOOT_ENDPOINTS = ['/geolocation', '/v2/supportedNetworks', '/tokens/0x1'];
 
 async function runBootFetches() {
   for (const path of BOOT_ENDPOINTS) {
-    const traceparent = getCurrentTraceparent();
-    log(`boot fetch ${path} — hand-rolled traceparent names ${traceparent ?? 'nothing'}`);
+    log(`boot fetch ${path} — traceparent set by the SDK, not by us`);
     try {
-      await fetch(`${API}${path}`, {
-        headers: traceparent ? { traceparent } : {},
-      });
+      await fetch(`${API}${path}`);
     } catch (error) {
       log(`boot fetch ${path} failed — is the backend running?`, error.message);
     }
@@ -88,11 +82,8 @@ async function runWalletAlignment() {
 async function runBridgeQuotesFetched() {
   return trace({ name: TraceName.BridgeQuotesFetched }, async (span) => {
     log('BridgeQuotesFetched tick —', describeParent(span));
-    const traceparent = getCurrentTraceparent();
     try {
-      const response = await fetch(`${API}/quote`, {
-        headers: traceparent ? { traceparent } : {},
-      });
+      const response = await fetch(`${API}/quote`);
       log('BridgeQuotesFetched ->', response.status);
     } catch (error) {
       log('BridgeQuotesFetched failed — is the backend running?', error.message);
