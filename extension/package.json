@@ -1,0 +1,16 @@
+{
+  "name": "trace-orphaning-repro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MV3 extension reproducing the upstream project's trace-orphaning bugs",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch"
+  },
+  "dependencies": {
+    "@sentry/browser": "8.33.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Trace Orphaning Repro",
+  "version": "1.0.0",
+  "description": "Reproduces the upstream project's two trace-orphaning bugs: sibling attachment via hand-rolled traceparent (Bug A) and ambient-parent fallback + missing flush (Bug B).",
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Trace orphaning repro",
+    "default_popup": "app/popup.html"
+  },
+  "host_permissions": [
+    "http://localhost:4000/*",
+    "https://o4508236363464704.ingest.us.sentry.io/*"
+  ]
+}

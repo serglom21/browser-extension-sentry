@@ -1,0 +1,7 @@
+node_modules/
+extension/service-worker.js
+extension/service-worker.js.map
+extension/popup.bundle.js
+extension/popup.bundle.js.map
+demo/captured-spans.jsonl
+.DS_Store

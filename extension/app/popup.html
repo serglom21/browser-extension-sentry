@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Trace orphaning repro</title>
+    <style>
+      body {
+        font: 13px/1.5 -apple-system, system-ui, sans-serif;
+        width: 330px;
+        margin: 0;
+        padding: 14px;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0 0 10px;
+        color: #555;
+      }
+      button {
+        width: 100%;
+        padding: 9px;
+        font-size: 13px;
+        font-weight: 600;
+        border: 0;
+        border-radius: 6px;
+        background: #362d59;
+        color: #fff;
+        cursor: pointer;
+        margin-bottom: 6px;
+      }
+      button.secondary {
+        background: #a33;
+      }
+      button:disabled {
+        background: #bbb;
+        cursor: default;
+      }
+      #status {
+        margin-top: 6px;
+        padding: 8px;
+        background: #f4f4f6;
+        border-radius: 6px;
+        white-space: pre-wrap;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 11px;
+        min-height: 44px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Trace orphaning repro</h1>
+    <p>
+      Fires <code>Transaction</code>, <code>Wallet Alignment</code> and
+      <code>BridgeQuotesFetched</code> on a 15s schedule with deliberate overlaps.
+    </p>
+    <button id="run">Run 15s demo</button>
+    <button id="kill" class="secondary">Kill service worker (no flush)</button>
+    <div id="status">idle</div>
+    <script src="../popup.bundle.js"></script>
+  </body>
+</html>
