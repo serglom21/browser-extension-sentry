@@ -5,3 +5,4 @@ extension/popup.bundle.js
 extension/popup.bundle.js.map
 demo/captured-spans.jsonl
 .DS_Store
+demo/concurrency-report.jsonl

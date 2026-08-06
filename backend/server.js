@@ -269,6 +269,19 @@ app.post('/__envelope', (req, res) => {
   res.sendStatus(200);
 });
 
+/**
+ * Diagnostic sink for the service worker's concurrency test self-report. Kept in its
+ * own file so captured-spans.jsonl stays purely span envelopes — the span envelopes
+ * remain the authority, this is only for cross-checking.
+ */
+app.post('/__diag', (req, res) => {
+  const file = path.join(__dirname, '..', 'demo', 'concurrency-report.jsonl');
+  const body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body ?? {});
+  fs.appendFileSync(file, `${body}\n`);
+  console.log(`[${ts()}] concurrency diagnostic report received (${body.length} bytes)`);
+  res.sendStatus(200);
+});
+
 // --- boot --------------------------------------------------------------------
 
 app.get('/', (_req, res) => {

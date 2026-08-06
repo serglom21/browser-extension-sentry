@@ -45,6 +45,21 @@ importButton.addEventListener('click', async () => {
   await chrome.runtime.sendMessage({ type: 'IMPORT_ITEM' });
 });
 
+/**
+ * Temporary diagnostic: runs the three concurrency tests inside the real service
+ * worker, so the result cannot be an artefact of bare Node's scheduling.
+ */
+document.getElementById('conc').addEventListener('click', async () => {
+  setStatus('running concurrency diagnostic in the service worker…');
+  const res = await chrome.runtime.sendMessage({ type: 'CONCURRENCY_TEST' });
+  const t = res?.report?.tests ?? {};
+  const lines = Object.entries(t).map(([k, v]) => {
+    const s = v.summary;
+    return `${k}\n  parent points at sibling: ${s.parent_span_id_points_at_sibling}\n  distinct trace ids: ${s.distinct_trace_ids}`;
+  });
+  setStatus(lines.join('\n') || 'no result');
+});
+
 killButton.addEventListener('click', async () => {
   setStatus('killing worker — anything still batched is lost');
   try {

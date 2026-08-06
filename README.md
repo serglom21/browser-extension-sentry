@@ -124,6 +124,44 @@ Note that signature 2 cannot be detected from the captured data alone — the lo
 leaves no record at all. The printer flags it by comparing against the expected
 invocation count, which the demo knows because it double-clicks deliberately.
 
+## Concurrency diagnostic — does `parentSpan: null` hold in a real MV3 worker?
+
+**Temporary diagnostic**, triggered by the popup's **Run Concurrency Test** button. It
+exists to rule out any difference between bare Node's microtask/event-loop scheduling and
+a real service worker's behaviour under Chrome. Every operation is started with an
+explicit `parentSpan: null` wrapped in `withIsolationScope`, mirroring the validated fix,
+and deliberately bypasses this branch's `trace()` so the ambient fallback cannot
+interfere.
+
+Three tests, run in the actual loaded extension's worker on Chrome 150, SDK 8.33.1:
+
+| Test | Shape | `parent_span_id` points at a sibling? | `trace_id` shared? |
+| --- | --- | --- | --- |
+| 1 | Two ops, B starts 5ms into A's 30ms window | **No** — both `null` | Yes, 1 trace id |
+| 2 | Three ops, C starts while A and B unresolved | **No** — all three `null` | Yes, 1 trace id |
+| 3 | Timer-free, hand-controlled promises; all three suspended before any resolves, then resolved C → A → B | **No** — all three `null` | Yes, 1 trace id |
+
+**Result: identical to bare Node. No misattachment in any of the three.** Nothing about
+real browser or extension timing surfaces a parenting failure that Node testing missed.
+
+The two questions are reported separately on purpose:
+
+- `parent_span_id` — all eight spans came back `null`. `parentSpan: null` blocks ambient
+  parent inheritance, and it holds under overlap in a real worker.
+- `trace_id` — all eight share one id, and that id is the worker instance's own
+  propagation-context/pageload trace. This is expected and by design: every scope clone
+  copies the propagation context, so `parentSpan: null` does not change it. It would only
+  be worth flagging if the ids *failed* to match.
+
+Verified from raw data, not self-reported: `demo/fixtures/05-concurrency-parentspan-null.jsonl`
+holds the eight span envelopes, and the worker's own reading in
+`demo/fixtures/05-concurrency-selfreport.json` agrees with them on **8 of 8** span ids for
+both fields.
+
+```bash
+node demo/print-trace-tree.js --file demo/fixtures/05-concurrency-parentspan-null.jsonl
+```
+
 ## Setup
 
 Node 18+ and Chrome. **Rebuild after every branch switch** — Chrome loads the bundle,
