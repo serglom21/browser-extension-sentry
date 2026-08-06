@@ -13,5 +13,8 @@
   "host_permissions": [
     "http://localhost:4000/*",
     "https://o4508236363464704.ingest.us.sentry.io/*"
+  ],
+  "permissions": [
+    "storage"
   ]
 }

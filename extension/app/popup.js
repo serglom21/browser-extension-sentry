@@ -60,6 +60,30 @@ document.getElementById('conc').addEventListener('click', async () => {
   setStatus(lines.join('\n') || 'no result');
 });
 
+/**
+ * Temporary diagnostic: fires 4 traced operations and arms the 2000ms debounced
+ * flush. Kill the worker within the window for the short-gap case, or wait it out
+ * for the long-gap case, then reopen the popup to read the persisted counters.
+ */
+document.getElementById('flush').addEventListener('click', async () => {
+  const prior = await chrome.runtime.sendMessage({ type: 'READ_FLUSH_DIAG' });
+  if (prior) {
+    setStatus(
+      `previous run (${prior.pass}):\n` +
+        `  ops completed:     ${prior.opsCompleted}\n` +
+        `  envelopes sent:    ${prior.envelopesConfirmedSent}/${prior.envelopesAttempted}\n` +
+        `  debounce fired:    ${prior.debounceFired}\n` +
+        'starting a new run…',
+    );
+  }
+  const res = await chrome.runtime.sendMessage({ type: 'FLUSH_RESCUE', pass: 'short' });
+  setStatus(
+    `flush-rescue armed (${res.debounceMs}ms).\n` +
+      `${res.opsCompleted} ops completed.\n` +
+      'kill the worker now, or wait it out.',
+  );
+});
+
 killButton.addEventListener('click', async () => {
   setStatus('killing worker — anything still batched is lost');
   try {

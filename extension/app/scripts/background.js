@@ -1,7 +1,11 @@
 import * as Sentry from '@sentry/browser';
 import { spanToJSON } from '@sentry/core';
 import { withIsolationScope as sentryWithIsolationScope } from '@sentry/browser';
-import { setupSentry, markBackgroundInitialized } from './lib/setupSentry.js';
+import {
+  setupSentry,
+  markBackgroundInitialized,
+  transportStats,
+} from './lib/setupSentry.js';
 import { getCurrentTraceparent } from './lib/sentry-trace-propagation.ts';
 import { trace, endTrace, TraceName } from '../../shared/lib/trace.ts';
 
@@ -323,6 +327,109 @@ async function runConcurrencyTest() {
   return report;
 }
 
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — does the debounced flush actually rescue anything?
+//
+// Implements the proposed replacement for the (non-firing) onSuspend listener:
+// scheduleFlush() with a 2000ms debounce, called after every span.end().
+//
+// Counters are persisted to chrome.storage.local after every change — the same
+// technique that proved onSuspend never fires — so they survive the worker being
+// killed and can be read on the next wake.
+// ===========================================================================
+
+const FLUSH_MARKER = 'flush-rescue-';
+const FLUSH_DEBOUNCE_MS = 2000;
+
+let flushTimer = null;
+let flushDiag = null;
+
+async function persistFlushDiag() {
+  if (!flushDiag) {
+    return;
+  }
+  flushDiag.envelopesAttempted = transportStats.attempted;
+  flushDiag.envelopesConfirmedSent = transportStats.confirmedSent;
+  flushDiag.updatedAt = Date.now();
+  try {
+    await chrome.storage.local.set({ flushRescue: { ...flushDiag } });
+  } catch {
+    /* worker may be mid-teardown; that is itself a result */
+  }
+}
+
+transportStats.onChange = () => {
+  persistFlushDiag();
+};
+
+/** The proposed fix: debounce a flush, re-armed after every span that ends. */
+function scheduleFlush() {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+  }
+  flushTimer = setTimeout(async () => {
+    flushTimer = null;
+    const delivered = await Sentry.flush(2000);
+    log(`flush(debounced ${FLUSH_DEBOUNCE_MS}ms) -> ${delivered ? 'drained' : 'timed out'}`);
+    if (flushDiag) {
+      flushDiag.debounceFired = true;
+      flushDiag.flushDrained = delivered;
+      await persistFlushDiag();
+    }
+  }, FLUSH_DEBOUNCE_MS);
+}
+
+/**
+ * Fire 4 short traced operations in quick succession, Wallet-Alignment shaped. Each
+ * one re-arms the debounce, so the scheduled flush lands 2000ms after the LAST one.
+ */
+async function runFlushRescueTest(pass = 'short') {
+  transportStats.marker = FLUSH_MARKER;
+  transportStats.attempted = 0;
+  transportStats.confirmedSent = 0;
+
+  flushDiag = {
+    pass,
+    opsStarted: 0,
+    opsCompleted: 0,
+    envelopesAttempted: 0,
+    envelopesConfirmedSent: 0,
+    debounceFired: false,
+    flushDrained: null,
+    debounceMs: FLUSH_DEBOUNCE_MS,
+    startedAt: Date.now(),
+  };
+  await chrome.storage.local.set({ flushRescue: { ...flushDiag } });
+
+  const OPS = 4;
+  log(`=== flush-rescue test (${pass} gap): firing ${OPS} operations ===`);
+
+  for (let index = 1; index <= OPS; index += 1) {
+    flushDiag.opsStarted += 1;
+    await traceWithNullParent(`${FLUSH_MARKER}op-${index}`, async (span) => {
+      await sleep(20);
+      span.end();
+    });
+    flushDiag.opsCompleted += 1;
+    scheduleFlush(); // called after every span.end()
+    await persistFlushDiag();
+    await sleep(30);
+  }
+
+  flushDiag.opsDoneAt = Date.now();
+  await persistFlushDiag();
+  log(
+    `=== ${OPS} operations completed; debounce armed for ${FLUSH_DEBOUNCE_MS}ms. ` +
+      'Kill the worker now for the short-gap case. ===',
+  );
+  return { ...flushDiag };
+}
+
+async function readFlushDiag() {
+  const stored = await chrome.storage.local.get(['flushRescue']);
+  return stored.flushRescue ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Demo driver — a fixed 15s schedule.
 //
@@ -375,6 +482,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     runDemo().then(sendResponse);
     return true;
   }
+  if (message?.type === 'FLUSH_RESCUE') {
+    runFlushRescueTest(message.pass ?? 'short').then((r) => sendResponse(r));
+    return true;
+  }
+  if (message?.type === 'READ_FLUSH_DIAG') {
+    readFlushDiag().then((r) => sendResponse(r));
+    return true;
+  }
   if (message?.type === 'CONCURRENCY_TEST') {
     runConcurrencyTest().then((report) => sendResponse({ done: true, report }));
     return true;
@@ -400,6 +515,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 self.__runDemo = runDemo;
 self.__importItem = handleImport;
 self.__runConcurrencyTest = runConcurrencyTest;
+self.__runFlushRescueTest = runFlushRescueTest;
+self.__readFlushDiag = readFlushDiag;
 self.__terminateWorker = terminateWorker;
 
 runBootFetches();

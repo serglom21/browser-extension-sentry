@@ -32,8 +32,32 @@ const DSN =
  * sink and Sentry's ingest endpoint want. That keeps this file identical across the
  * 8.33.1 and 10.38.0 branches.
  */
+/**
+ * Counters for the flush-rescue diagnostic.
+ *
+ * `confirmedSent` counts only envelopes whose upstream POST returned a status — i.e.
+ * requests that demonstrably completed before the worker died. Envelopes still in
+ * flight when the worker is terminated never reach this counter, which is exactly the
+ * loss window being measured.
+ */
+export const transportStats = {
+  marker: null,
+  attempted: 0,
+  confirmedSent: 0,
+  onChange: null,
+};
+
 function makeTeeTransport(options) {
   return createTransport(options, async (request) => {
+    const isDiagnostic =
+      transportStats.marker &&
+      typeof request.body === 'string' &&
+      request.body.includes(transportStats.marker);
+
+    if (isDiagnostic) {
+      transportStats.attempted += 1;
+      transportStats.onChange?.();
+    }
     // Local copy. Deliberately not awaited: a stopped backend must not delay or
     // fail delivery to Sentry.
     fetch(ENVELOPE_SINK_URL, {
@@ -57,6 +81,10 @@ function makeTeeTransport(options) {
         body: request.body,
       });
       console.log(`[repro] envelope -> sentry.io HTTP ${response.status}`);
+      if (isDiagnostic) {
+        transportStats.confirmedSent += 1;
+        transportStats.onChange?.();
+      }
       return { statusCode: response.status };
     } catch (error) {
       console.warn(

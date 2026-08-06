@@ -162,6 +162,48 @@ both fields.
 node demo/print-trace-tree.js --file demo/fixtures/05-concurrency-parentspan-null.jsonl
 ```
 
+## Flush-rescue diagnostic — does the debounced flush actually rescue anything?
+
+**Temporary diagnostic**, popup button **Test Flush Rescue**. Implements the proposed
+replacement for the non-firing `onSuspend` listener: `scheduleFlush()` with a 2000ms
+debounce, re-armed after every `span.end()`. Counters persist to
+`chrome.storage.local` after every change, so they survive the worker being killed.
+
+Four short traced operations, then the worker is terminated at varying delays.
+`envelopesConfirmedSent` counts only envelopes whose upstream POST returned a status —
+requests still in flight at termination never reach it.
+
+| Kill delay after last op | Debounce fired? | Envelopes confirmed sent |
+| --- | --- | --- |
+| 2ms | no | **3 / 4** |
+| 300ms (inside the 2000ms window) | no | **4 / 4** |
+| 2600ms (after the window) | yes, drained | **4 / 4** |
+
+**The debounce is not what delivers the spans.** At 300ms — well inside the debounce
+window, with the flush provably not yet fired — all four envelopes were already
+confirmed sent. Reading the SDK source explains why: `Client.sendEnvelope()` is called
+immediately when a span ends, and `flush(timeout)` is just `buffer.drain(timeout)`. It
+awaits *in-flight requests*; there is no queue of unsent data for it to push out.
+
+So the real exposure window is the in-flight duration of an HTTP request — single-digit
+milliseconds here — not the debounce interval. Only the 2ms kill lost anything, and it
+lost exactly the one request that had not yet come back.
+
+This matters for how the fix is described. The debounced flush is harmless and worth
+keeping for the browser-quit and extension-reload paths, but it is **not** what rescues
+timer-driven spans, and it cannot be: Chrome's idle termination requires ~30 seconds of
+inactivity, so a real idle kill can never land inside a 2000ms window. The spans that
+were being lost were not sitting in a queue waiting for a flush.
+
+Independently verified rather than self-reported: all 12 attempted envelopes across the
+three passes reached the local sink (`demo/fixtures/06-flush-rescue.jsonl`), and the
+backend logged 12 envelope POSTs.
+
+Methodological note: termination here is a forced CDP `Target.closeTarget`, not Chrome's
+idle heuristic. The earlier `onSuspend` result used genuine idle termination — clients
+detached, ~30s wait — which cannot be used here, because by construction it can never
+occur inside a 2-second window.
+
 ## Setup
 
 Node 18+ and Chrome. **Rebuild after every branch switch** — Chrome loads the bundle,
