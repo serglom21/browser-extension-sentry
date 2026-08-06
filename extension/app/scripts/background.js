@@ -96,8 +96,8 @@ async function runBridgeQuotesFetched() {
 }
 
 // ---------------------------------------------------------------------------
-// Operation 4: Import Item — the manual start/end pattern, mirroring the real
-// import-nfts-modal.js handler. Note there is no explicit `id`, matching the real
+// Operation 4: Import Item — the manual start/end pattern, mirroring the real upstream
+// import-asset modal handler. Note there is no explicit `id`, matching the real
 // call site, which is what makes two overlapping invocations collide on the single
 // `tracesByKey` key `Import Item:default`. See BUG C in shared/lib/trace.ts.
 //
