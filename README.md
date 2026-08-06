@@ -43,6 +43,7 @@ transactions**, so the counts are matched and the only differences are structura
 | `main` — both bugs | [`c4c2dcad…`](https://snout-and-about.sentry.io/explore/traces/trace/c4c2dcada8a149e0b8c9238a0067924b) | `demo/fixtures/01-main-both-bugs.jsonl` |
 | `fix/sentry-v10-upgrade` — Bug A fixed | [`c0446dc4…`](https://snout-and-about.sentry.io/explore/traces/trace/c0446dc4772c4ee49e8400a6d3f5db49) | `demo/fixtures/02-v10-upgrade-bugA-fixed.jsonl` |
 | `fix/centralized-parenting` — both fixed | [`19e1a288…`](https://snout-and-about.sentry.io/explore/traces/trace/19e1a288d8814b2cbbad917a78eca147) | `demo/fixtures/03-fixed-both-bugs.jsonl` |
+| `main` — Bug C, double-click only | [`4468269e…`](https://snout-and-about.sentry.io/explore/traces/trace/4468269e7692400486a9102af88536ad) | `demo/fixtures/04-tracesbykey-collision.jsonl` |
 
 What each run measured:
 
@@ -70,6 +71,58 @@ either Bug B fix, so it still runs to `finalTimeout` on all three branches and t
 printer still labels its subtree a mega-trace on the fixed branch. What changes is what
 it contains — 18 unrelated transactions over 28.4s, down to 3 boot fetches over 0.4s.
 Bounding that span is separate work, tracked as the trace-id-persistence finding below.
+
+
+## Bug C — the `tracesByKey` collision (unfixed)
+
+A third defect, reproduced on `main` only. **No fix is implemented for it** — neither
+Bug B change addresses it.
+
+`shared/lib/trace.ts` keys pending manual traces in a plain module-level Map:
+
+```js
+getTraceKey(request) = [request.name, request.id ?? 'default'].join(':')
+```
+
+The `id` defaults to the literal `'default'`, so every caller that omits it — the common
+case in UI code — shares the single key `<name>:default`. `Import Item` follows the real
+modal pattern and passes no `id`:
+
+```js
+trace({ name: 'Import Item' });   // no explicit id, matching the real call site
+// ...~800ms of async work...
+endTrace({ name: 'Import Item' });
+```
+
+Double-click the popup's **Import Item** button and the second invocation starts before
+the first finishes. What happens, straight from the worker console:
+
+```
+Import Item click #1 — startTrace
+[trace] Started trace Import Item
+Import Item click #2 — startTrace
+[trace] Started trace Import Item          <- overwrites the Map entry; span A is now unreachable
+Import Item click #1 — endTrace
+[trace] Ended trace Import Item            <- ends span B, with click #1's timing
+Import Item click #2 — endTrace
+[trace] No pending trace found Import Item <- silently lost, span A never ends
+```
+
+Two failure modes at once, both confirmed in the captured JSON and in Sentry:
+
+1. **The surviving span belongs to neither click.** It carries click #2's *start* and
+   click #1's *end*. Captured at **561ms** against ~800ms of real work — short by
+   239ms, which is the 250ms double-click gap. The faster the double-click, the smaller
+   the error, which is what makes this hard to spot in aggregate.
+2. **One `endTrace()` is a silent no-op.** Span A is never ended, so it is never sent.
+   Two user actions produce **one** span.
+
+The corroborating detail worth pointing at: the backend logged **two** `/tokens/0x1`
+import fetches, so both clicks demonstrably did their work. Sentry shows one span.
+
+Note that signature 2 cannot be detected from the captured data alone — the lost span
+leaves no record at all. The printer flags it by comparing against the expected
+invocation count, which the demo knows because it double-clicks deliberately.
 
 ## Setup
 

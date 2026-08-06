@@ -33,6 +33,12 @@ export enum TraceName {
    */
   WalletAlignment = 'Wallet Alignment',
   BridgeQuotesFetched = 'BridgeQuotesFetched',
+
+  /**
+   * Real value from the upstream enum. Used with the manual start/end pattern and no
+   * explicit `id`, which is what triggers the tracesByKey collision (BUG C).
+   */
+  ImportItem = 'Import Item',
 }
 
 const OP_DEFAULT = 'custom';
@@ -247,10 +253,30 @@ function startSpan<T>(
   return sentryWithIsolationScope(() => callback(spanOptions));
 }
 
+/**
+ * BUG C — `tracesByKey` collision.
+ *
+ * The key is derived from name + id, and `id` defaults to the literal `'default'`
+ * when a caller omits it. Callers that follow the manual start/end pattern without
+ * passing an `id` — which is the common case in UI code — therefore all share the
+ * single key `<name>:default`.
+ *
+ * `tracesByKey` is a plain module-level Map with no per-call isolation, so two
+ * overlapping operations of the same name collide:
+ *
+ *   startTrace #1  ->  Map['Import Item:default'] = span A
+ *   startTrace #2  ->  Map['Import Item:default'] = span B   (span A is now
+ *                      unreachable: nothing holds a reference to it any more)
+ *   endTrace   #1  ->  reads the Map, finds span B, ends B with #1's timing,
+ *                      deletes the key
+ *   endTrace   #2  ->  Map is empty, logs "No pending trace found", returns
+ *
+ * Net effect: span B is stamped with the wrong operation's end time, and span A is
+ * never ended at all — so it is never sent, and the second `endTrace()` is a silent
+ * no-op. Two user actions produce one span, whose duration belongs to neither.
+ */
 function getTraceKey(request: TraceRequest | EndTraceRequest): string {
-  const { name } = request;
-  const id = 'id' in request ? request.id ?? 'default' : 'default';
-  return `${name}:${id}`;
+  return [request.name, request.id ?? 'default'].join(':');
 }
 
 function log(...args: unknown[]): void {

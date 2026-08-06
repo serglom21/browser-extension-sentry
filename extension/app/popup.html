@@ -54,8 +54,13 @@
     <p>
       Fires <code>Transaction</code>, <code>Wallet Alignment</code> and
       <code>BridgeQuotesFetched</code> on a 15s schedule with deliberate overlaps.
+      <br /><br />
+      <strong>Import Item</strong> uses the manual start/end trace pattern. One click
+      = one import (~800ms). <em>Double-click</em> it so the second starts before the
+      first finishes — that is the <code>tracesByKey</code> collision.
     </p>
     <button id="run">Run 15s demo</button>
+    <button id="import">Import Item — double-click me</button>
     <button id="kill" class="secondary">Kill service worker (no flush)</button>
     <div id="status">idle</div>
     <script src="../popup.bundle.js"></script>

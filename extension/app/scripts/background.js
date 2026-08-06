@@ -2,7 +2,7 @@ import * as Sentry from '@sentry/browser';
 import { spanToJSON } from '@sentry/core';
 import { setupSentry, markBackgroundInitialized } from './lib/setupSentry.js';
 import { getCurrentTraceparent } from './lib/sentry-trace-propagation.ts';
-import { trace, TraceName } from '../../shared/lib/trace.ts';
+import { trace, endTrace, TraceName } from '../../shared/lib/trace.ts';
 
 setupSentry();
 
@@ -96,6 +96,37 @@ async function runBridgeQuotesFetched() {
 }
 
 // ---------------------------------------------------------------------------
+// Operation 4: Import Item — the manual start/end pattern, mirroring the real
+// import-nfts-modal.js handler. Note there is no explicit `id`, matching the real
+// call site, which is what makes two overlapping invocations collide on the single
+// `tracesByKey` key `Import Item:default`. See BUG C in shared/lib/trace.ts.
+//
+// One click = one handleImport(). Double-click the popup button and the second
+// invocation starts before the first has finished its ~800ms of work.
+// ---------------------------------------------------------------------------
+
+let importAttempts = 0;
+
+async function handleImport() {
+  const attempt = ++importAttempts;
+  log(`Import Item click #${attempt} — startTrace`);
+
+  trace({ name: TraceName.ImportItem }); // no explicit id, matching real code
+
+  // Simulated async work: fetch a fake asset.
+  try {
+    await fetch(`${API}/tokens/0x1`);
+  } catch {
+    /* backend down; the timing is what matters here */
+  }
+  await sleep(800);
+
+  log(`Import Item click #${attempt} — endTrace`);
+  endTrace({ name: TraceName.ImportItem });
+  log(`Import Item click #${attempt} — done`);
+}
+
+// ---------------------------------------------------------------------------
 // Demo driver — a fixed 15s schedule.
 //
 // NOTE: there is deliberately no keep-alive here. Chrome terminating this worker is
@@ -147,6 +178,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     runDemo().then(sendResponse);
     return true;
   }
+  if (message?.type === 'IMPORT_ITEM') {
+    handleImport();
+    sendResponse({ started: true });
+    return false;
+  }
   if (message?.type === 'TERMINATE_WORKER') {
     sendResponse({ terminating: true });
     setTimeout(terminateWorker, 50);
@@ -161,6 +197,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // Exposed for driving the demo from the service worker console.
 self.__runDemo = runDemo;
+self.__importItem = handleImport;
 self.__terminateWorker = terminateWorker;
 
 runBootFetches();

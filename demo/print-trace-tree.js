@@ -361,6 +361,71 @@ for (const [parentId, group] of byUnresolvedParent) {
  * the usual culprit: it is not flushed until finalTimeout, and is lost entirely if
  * the service worker is terminated first.
  */
+/**
+ * BUG C — `tracesByKey` collision on the manual start/end pattern.
+ *
+ * `Import Item` is started with no explicit `id`, so every invocation shares the key
+ * `Import Item:default` in a plain module-level Map. Two overlapping clicks collide:
+ * the second `startTrace` overwrites the first's entry, the first `endTrace` ends the
+ * *second* span with the wrong timing, and the second `endTrace` finds an empty Map
+ * and silently returns.
+ *
+ * Two detectable signatures:
+ *
+ *   1. a captured span whose duration is materially off the work it actually did
+ *      (it was stamped with the other invocation's end time)
+ *   2. fewer captured spans than invocations — the orphaned span is never ended, so
+ *      it is never sent at all
+ *
+ * Signature 2 cannot be inferred from the captured JSON alone, precisely because the
+ * lost span produces no record. The demo double-clicks, so the expectation is two.
+ */
+const IMPORT_OP_NAME = 'Import Item';
+const IMPORT_EXPECTED_MS = 800;
+const IMPORT_TOLERANCE = 0.25;
+const IMPORT_EXPECTED_COUNT = 2;
+
+const imports = [...nodes.values()].filter((n) => n.name === IMPORT_OP_NAME);
+
+if (imports.length > 0) {
+  const durations = imports.map((n) => ({
+    node: n,
+    ms: n.start != null && n.end != null ? (n.end - n.start) * 1000 : null,
+  }));
+  const skewed = durations.filter(
+    (d) =>
+      d.ms != null &&
+      Math.abs(d.ms - IMPORT_EXPECTED_MS) / IMPORT_EXPECTED_MS > IMPORT_TOLERANCE,
+  );
+  const lost = IMPORT_EXPECTED_COUNT - imports.length;
+
+  if (skewed.length > 0 || lost > 0) {
+    console.log(`  ${red(bold('BUG C — tracesByKey collision'))}:`);
+    console.log(
+      `      ${imports.length} "${IMPORT_OP_NAME}" span(s) captured, ` +
+        `${IMPORT_EXPECTED_COUNT} invocation(s) expected` +
+        (lost > 0
+          ? ` ${red(`-> ${lost} endTrace() silently lost, span never ended, never sent`)}`
+          : ''),
+    );
+    for (const d of durations) {
+      const off =
+        d.ms == null
+          ? 'unknown duration'
+          : `${Math.round(d.ms)}ms vs ~${IMPORT_EXPECTED_MS}ms expected` +
+            (skewed.includes(d)
+              ? ` ${red(`(off by ${Math.round(d.ms - IMPORT_EXPECTED_MS)}ms — wrong end time)`)}`
+              : ' (plausible)');
+      console.log(`      ${d.node.id}  ${off}`);
+    }
+  } else {
+    console.log(
+      `  ${green('BUG C clear')} — ${imports.length} "${IMPORT_OP_NAME}" span(s), ` +
+        `durations consistent with the work done.`,
+    );
+  }
+}
+
 // --- Bug A summary -----------------------------------------------------------
 const serverSpans = [...nodes.values()].filter((n) => n.op === 'http.server');
 const siblings = serverSpans.filter(isSiblingAttached);

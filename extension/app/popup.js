@@ -27,6 +27,24 @@ runButton.addEventListener('click', async () => {
   }
 });
 
+/**
+ * One click = one import, exactly like the real modal handler. Double-clicking
+ * therefore fires two overlapping invocations, which is the scenario that collides
+ * on the shared `Import Item:default` key.
+ */
+const importButton = document.getElementById('import');
+let importClicks = 0;
+
+importButton.addEventListener('click', async () => {
+  importClicks += 1;
+  setStatus(
+    `Import Item click ${importClicks} sent.\n` +
+      'double-click for the collision, then:\n' +
+      'node demo/print-trace-tree.js',
+  );
+  await chrome.runtime.sendMessage({ type: 'IMPORT_ITEM' });
+});
+
 killButton.addEventListener('click', async () => {
   setStatus('killing worker — anything still batched is lost');
   try {
