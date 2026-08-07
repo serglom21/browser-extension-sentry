@@ -104,7 +104,8 @@ async function runBridgeQuotesFetched() {
 // Operation 4: Import Item — the manual start/end pattern, mirroring the real upstream
 // import-asset modal handler. Note there is no explicit `id`, matching the real
 // call site, which is what makes two overlapping invocations collide on the single
-// `tracesByKey` key `Import Item:default`. See BUG C in shared/lib/trace.ts.
+// `tracesByKey` key `Import Item:default`. See the tracesByKey collision in
+// shared/lib/trace.ts.
 //
 // One click = one handleImport(). Double-click the popup button and the second
 // invocation starts before the first has finished its ~800ms of work.

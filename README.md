@@ -13,13 +13,16 @@ Envelopes go to the real Sentry project `snout-and-about/browser-extension` **an
 a local file, so the demo works in the Sentry UI or fully offline via
 `demo/print-trace-tree.js`.
 
-## The three branches
+## The branches
 
-| Branch | SDK | Bug A | Bug B |
-| --- | --- | --- | --- |
-| `main` | **8.33.1** (what production runs) | **broken** | **broken** |
-| `fix/sentry-v10-upgrade` | 10.38.0 | **fixed** | **still broken** ← the money slide |
-| `fix/centralized-parenting` | 10.38.0 | fixed | **fixed** |
+Each branch stacks on the one above it, so every diff shows only its own change.
+
+| Branch | SDK | Bug A | Bug B | `tracesByKey` collision |
+| --- | --- | --- | --- | --- |
+| `main` | **8.33.1** (what production runs) | **broken** | **broken** | **broken** |
+| `fix/sentry-v10-upgrade` | 10.38.0 | **fixed** | **still broken** ← the money slide | broken |
+| `fix/centralized-parenting` | 10.38.0 | fixed | **fixed** | broken |
+| `fix/tracesbykey-collision` | 10.38.0 | fixed | fixed | **fixed** |
 
 Measured on identical 15s runs:
 
@@ -43,7 +46,7 @@ transactions**, so the counts are matched and the only differences are structura
 | `main` — both bugs | [`c4c2dcad…`](https://snout-and-about.sentry.io/explore/traces/trace/c4c2dcada8a149e0b8c9238a0067924b) | `demo/fixtures/01-main-both-bugs.jsonl` |
 | `fix/sentry-v10-upgrade` — Bug A fixed | [`c0446dc4…`](https://snout-and-about.sentry.io/explore/traces/trace/c0446dc4772c4ee49e8400a6d3f5db49) | `demo/fixtures/02-v10-upgrade-bugA-fixed.jsonl` |
 | `fix/centralized-parenting` — both fixed | [`19e1a288…`](https://snout-and-about.sentry.io/explore/traces/trace/19e1a288d8814b2cbbad917a78eca147) | `demo/fixtures/03-fixed-both-bugs.jsonl` |
-| `main` — Bug C, double-click only | [`4468269e…`](https://snout-and-about.sentry.io/explore/traces/trace/4468269e7692400486a9102af88536ad) | `demo/fixtures/04-tracesbykey-collision.jsonl` |
+| `main` — tracesByKey collision, double-click only | [`4468269e…`](https://snout-and-about.sentry.io/explore/traces/trace/4468269e7692400486a9102af88536ad) | `demo/fixtures/04-tracesbykey-collision.jsonl` |
 
 What each run measured:
 
@@ -73,10 +76,24 @@ it contains — 18 unrelated transactions over 28.4s, down to 3 boot fetches ove
 Bounding that span is separate work, tracked as the trace-id-persistence finding below.
 
 
-## Bug C — the `tracesByKey` collision (unfixed)
+## The `tracesByKey` collision
 
-A third defect, reproduced on `main` only. **No fix is implemented for it** — neither
-Bug B change addresses it.
+A third defect, independent of Bug A and Bug B — neither Bug B change addresses it.
+Reproduced on `main`, fixed on `fix/tracesbykey-collision`.
+
+| | before (`main`) | after (`fix/tracesbykey-collision`) |
+| --- | --- | --- |
+| `Import Item` spans for 2 clicks | **1** | **2** |
+| durations | **561ms** — belonged to neither click | **807ms** and **806ms** |
+| own fetch nested inside | **none** — attached to `pageload` | **1 `http.client` each** |
+| second `endTrace()` | `"No pending trace found"` | resolved as `auto-2` |
+| live trace | [`4468269e…`](https://snout-and-about.sentry.io/explore/traces/trace/4468269e7692400486a9102af88536ad) | [`dd47b650…`](https://snout-and-about.sentry.io/explore/traces/trace/dd47b6503a71437591ec6e304c6b7f5a) |
+| fixture | `demo/fixtures/04-tracesbykey-collision.jsonl` | `demo/fixtures/07-tracesbykey-fixed.jsonl` |
+
+```bash
+node demo/print-trace-tree.js --file demo/fixtures/04-tracesbykey-collision.jsonl  # before
+node demo/print-trace-tree.js --file demo/fixtures/07-tracesbykey-fixed.jsonl      # after
+```
 
 `shared/lib/trace.ts` keys pending manual traces in a plain module-level Map:
 
@@ -123,6 +140,89 @@ import fetches, so both clicks demonstrably did their work. Sentry shows one spa
 Note that signature 2 cannot be detected from the captured data alone — the lost span
 leaves no record at all. The printer flags it by comparing against the expected
 invocation count, which the demo knows because it double-clicks deliberately.
+
+### How it is fixed
+
+Two central changes in `shared/lib/trace.ts`, both with zero call-site changes.
+
+**1. `startTrace` mints a unique id per invocation** when the caller supplies none, so
+the key it writes can never collide. A monotonic counter rather than
+`crypto.randomUUID()` — cheaper, deterministic in tests, and uniqueness only has to hold
+for one worker lifetime, which is the lifetime of the Map.
+
+There is a catch worth stating plainly, because it rules out the obvious one-line
+version: `endTrace({ name })` receives **no id**, so it cannot recompute a generated key
+on its own. Generating a unique key and stopping there would turn every `endTrace` into
+a miss and end nothing at all — strictly worse than the collision. So a second index
+maps each name to its outstanding generated ids in start order, and `endTrace` takes the
+oldest. Generation stays scoped to `startTrace`; ends still resolve.
+
+**2. A manually started span now stays active until `endTrace`.** `startSpanManual` only
+keeps a span active for the synchronous duration of its callback, so nothing between
+`trace()` and `endTrace()` nested inside it. The span is now bound on the caller's scope
+for the whole window, via a stack so overlapping same-name operations that end out of
+order restore correctly.
+
+What this does **not** fix: FIFO pairing is not identity. If two same-name operations
+complete *out of order*, both spans are still emitted and each duration is a real
+measurement, but they are attributed to the wrong invocation. Passing an explicit `id`
+is the only way to pair exactly, which is what the dev warning pushes callers toward.
+
+## Isolation scope vs. current scope
+
+This repro calls `withIsolationScope` in `shared/lib/trace.ts`, matching the real
+codebase's own pattern — two call sites, both inside `startSpan`: the `continueTrace`
+path at **line 247** and the ordinary path at **line 253** (line numbers as on `main`;
+they shift to 398 and 404 on `fix/tracesbykey-collision` once the fix lands above them).
+
+**The tension, stated honestly.** The SDK's own JSDoc for this function is explicitly
+cautionary. From `@sentry/core`, `currentScopes.ts` (shipped as
+`build/types/currentScopes.d.ts`, lines 29–37):
+
+> Attempts to fork the current isolation scope and the current scope based on the current
+> async context strategy. If no async context strategy is set, the isolation scope and the
+> current scope will not be forked (this is currently the case, for example, in the
+> browser).
+>
+> Usage of this function in environments without async context strategy is discouraged and
+> may lead to unexpected behaviour.
+>
+> This function is intended for Sentry SDK and SDK integration development. It is not
+> recommended to be used in "normal" applications directly because it comes with pitfalls.
+> Use at your own risk!
+
+A browser extension is such an environment. Reading the runtime confirms what the comment
+says: the default stack strategy's `withIsolationScope` is
+
+```js
+function withIsolationScope(callback) {
+  return getAsyncContextStack().withScope(() => {
+    return callback(getAsyncContextStack().getIsolationScope());
+  });
+}
+```
+
+— it forks the **current** scope and hands the callback the **shared, unforked** isolation
+scope. So in the browser this call does not provide per-operation isolation at all; it
+behaves like `withScope` plus a handle to a process-wide object.
+
+**What was actually observed.** Across everything exercised in this repo — the
+concurrency diagnostic (8 spans across three overlap shapes, including a timer-free
+deterministic one), the `tracesByKey` collision repro, and the flush-rescue test — **no
+issue was ever traced back to isolation scope**. Every defect found had a different,
+identified root cause: an ambient `getActiveSpan()` lookup, a colliding Map key, a span
+that was never bound active, an eager transport. On this evidence the practical risk of
+the current usage pattern looks low, even though it runs against the SDK's own general
+caution.
+
+One concrete consequence, worth knowing rather than fearing: because the current scope
+*is* forked, a span bound inside that callback disappears when the fork pops. That is why
+`startTrace` captures `getCurrentScope()` **before** entering, and binds there. It is a
+constraint the fix had to work around, not a bug it caused.
+
+**No recommendation either way.** Switching to current scope is not recommended here, and
+neither is staying — the tension is real, the observed risk is low, and the call belongs
+to whoever owns this decision upstream.
 
 ## Concurrency diagnostic — does `parentSpan: null` hold in a real MV3 worker?
 

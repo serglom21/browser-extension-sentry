@@ -362,7 +362,7 @@ for (const [parentId, group] of byUnresolvedParent) {
  * the service worker is terminated first.
  */
 /**
- * BUG C — `tracesByKey` collision on the manual start/end pattern.
+ * The `tracesByKey` collision on the manual start/end pattern.
  *
  * `Import Item` is started with no explicit `id`, so every invocation shares the key
  * `Import Item:default` in a plain module-level Map. Two overlapping clicks collide:
@@ -400,7 +400,7 @@ if (imports.length > 0) {
   const lost = IMPORT_EXPECTED_COUNT - imports.length;
 
   if (skewed.length > 0 || lost > 0) {
-    console.log(`  ${red(bold('BUG C — tracesByKey collision'))}:`);
+    console.log(`  ${red(bold('tracesByKey collision'))}:`);
     console.log(
       `      ${imports.length} "${IMPORT_OP_NAME}" span(s) captured, ` +
         `${IMPORT_EXPECTED_COUNT} invocation(s) expected` +
@@ -420,7 +420,7 @@ if (imports.length > 0) {
     }
   } else {
     console.log(
-      `  ${green('BUG C clear')} — ${imports.length} "${IMPORT_OP_NAME}" span(s), ` +
+      `  ${green('tracesByKey collision clear')} — ${imports.length} "${IMPORT_OP_NAME}" span(s), ` +
         `durations consistent with the work done.`,
     );
   }

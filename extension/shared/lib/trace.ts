@@ -36,7 +36,7 @@ export enum TraceName {
 
   /**
    * Real value from the upstream enum. Used with the manual start/end pattern and no
-   * explicit `id`, which is what triggers the tracesByKey collision (BUG C).
+   * explicit `id`, which is what triggers the tracesByKey collision.
    */
   ImportItem = 'Import Item',
 }
@@ -254,7 +254,7 @@ function startSpan<T>(
 }
 
 /**
- * BUG C — `tracesByKey` collision.
+ * The `tracesByKey` collision.
  *
  * The key is derived from name + id, and `id` defaults to the literal `'default'`
  * when a caller omits it. Callers that follow the manual start/end pattern without
