@@ -132,7 +132,14 @@ export function setupSentry() {
         // the upstream predicate, verbatim.
         shouldCreateSpanForRequest: (url) => {
           // Do not create spans for outgoing requests to a 'sentry.io' domain.
-          return !url.match(/^https?:\/\/([\w\d.@-]+\.)?sentry\.io(\/|$)/u);
+          if (url.match(/^https?:\/\/([\w\d.@-]+\.)?sentry\.io(\/|$)/u)) {
+            return false;
+          }
+          // Nor for this demo's own envelope sink. Now that a manually started span
+          // stays active until endTrace, an untraced window no longer hides these
+          // uploads, and they would otherwise nest inside whichever operation happened
+          // to be open. Demo scaffolding only — the sink does not exist in production.
+          return !url.includes('/__envelope');
         },
       }),
     ],

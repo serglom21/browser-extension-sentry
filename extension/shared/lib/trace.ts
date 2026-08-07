@@ -6,6 +6,10 @@ import {
   withIsolationScope as sentryWithIsolationScope,
   continueTrace as sentryContinueTrace,
 } from '@sentry/browser';
+import {
+  getCurrentScope,
+  _INTERNAL_setSpanForScope as setSpanForScope,
+} from '@sentry/core';
 
 /**
  * Port of the upstream project's `shared/lib/trace.ts` (branch `main`).
@@ -91,6 +95,78 @@ type PendingTrace = {
 
 const tracesByKey: Map<string, PendingTrace> = new Map();
 
+/**
+ * The tracesByKey collision — fix, part 1.
+ *
+ * `startTrace` now mints a unique id for every invocation that does not supply one, so
+ * the key it writes is unique per invocation and `tracesByKey` can never collide. A
+ * monotonic counter is used rather than `crypto.randomUUID()`: it is cheaper, it is
+ * deterministic in tests, and uniqueness only has to hold within one worker lifetime,
+ * which is the entire lifetime of the Map.
+ *
+ * The catch this has to solve: `endTrace({ name })` receives no id, so it cannot
+ * recompute a generated key on its own. A second index maps each name to its
+ * outstanding generated ids in start order, and `endTrace` takes the oldest. So
+ * generation stays scoped to `startTrace` — zero call-site changes — while ends still
+ * resolve.
+ *
+ * An explicit `id` from the caller bypasses all of this and pairs exactly; that
+ * remains the precise option, and the warning below points callers at it.
+ */
+let traceSequence = 0;
+
+function nextTraceId(): string {
+  traceSequence += 1;
+  return `auto-${traceSequence}`;
+}
+
+/** name -> generated ids still awaiting an endTrace, oldest first. */
+const pendingAutoIdsByName: Map<string, string[]> = new Map();
+
+/**
+ * The tracesByKey collision — fix, part 2: keep a manually started span active
+ * until it ends.
+ *
+ * `startSpanManual` only makes the span active for the synchronous duration of its
+ * callback, so with the manual start/end pattern nothing that happens between
+ * `trace()` and `endTrace()` nests inside the span: fetches issued in that window
+ * attach to whatever is ambiently active instead (in a service worker, the pageload
+ * span). Binding the span on the caller's scope for the whole window fixes that.
+ *
+ * A stack is needed rather than a single save/restore because same-name operations can
+ * overlap and can end out of order. On end, the active span reverts to the innermost
+ * manual span that is still open, or to the baseline that was active before the first
+ * one started.
+ */
+type BoundSpan = { span: Sentry.Span; scope: Sentry.Scope };
+
+const boundSpans: BoundSpan[] = [];
+let baselineSpan: Sentry.Span | undefined;
+
+function bindActive(scope: Sentry.Scope, span: Sentry.Span): void {
+  if (boundSpans.length === 0) {
+    baselineSpan = sentryGetActiveSpan();
+  }
+  boundSpans.push({ span, scope });
+  setSpanForScope(scope, span);
+}
+
+function unbindActive(span: Sentry.Span): void {
+  const index = boundSpans.findIndex((entry) => entry.span === span);
+  if (index === -1) {
+    return;
+  }
+  const [removed] = boundSpans.splice(index, 1);
+  const innermost = boundSpans[boundSpans.length - 1];
+  setSpanForScope(
+    innermost?.scope ?? removed.scope,
+    innermost?.span ?? baselineSpan,
+  );
+  if (boundSpans.length === 0) {
+    baselineSpan = undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -113,7 +189,20 @@ export function trace<T>(
 
 export function endTrace(request: EndTraceRequest): void {
   const { name, timestamp } = request;
-  const key = getTraceKey(request);
+
+  // An explicit id pairs exactly. Without one, take the oldest outstanding generated
+  // id for this name, so the Nth end pairs with the Nth start.
+  let { id } = request;
+  const outstanding = pendingAutoIdsByName.get(name);
+
+  if (!id) {
+    id = outstanding?.shift();
+    if (outstanding && outstanding.length === 0) {
+      pendingAutoIdsByName.delete(name);
+    }
+  }
+
+  const key = id ? getTraceKey({ name, id }) : getTraceKey(request);
   const pendingTrace = tracesByKey.get(key);
 
   if (!pendingTrace) {
@@ -121,9 +210,14 @@ export function endTrace(request: EndTraceRequest): void {
     return;
   }
 
-  pendingTrace.end(timestamp);
   tracesByKey.delete(key);
-  log('Ended trace', name, request.id);
+  pendingTrace.end(timestamp);
+  log(
+    'Ended trace',
+    name,
+    id,
+    `(${pendingAutoIdsByName.get(name)?.length ?? 0} still pending)`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -150,13 +244,42 @@ function startTrace(request: TraceRequest): TraceContext {
   const { name, startTime: requestStartTime } = request;
   const startTime = requestStartTime ?? Date.now();
 
+  // The caller's scope, captured BEFORE entering withIsolationScope/startSpanManual —
+  // those fork, and a span bound on a fork disappears when the fork pops.
+  const outerScope = getCurrentScope();
+
   const callback = (span: Sentry.Span | null) => {
     const end = (timestamp?: number) => {
+      if (span) {
+        unbindActive(span);
+      }
       span?.end(timestamp);
     };
 
-    const pendingTrace = { end, request, startTime, span };
-    tracesByKey.set(getTraceKey(request), pendingTrace);
+    // Unique per invocation unless the caller supplied an id, so the key cannot
+    // collide with a concurrent call of the same name.
+    const id = request.id ?? nextTraceId();
+    const key = getTraceKey({ ...request, id });
+
+    if (!request.id) {
+      const outstanding = pendingAutoIdsByName.get(name) ?? [];
+      if (outstanding.length > 0) {
+        log(
+          `WARNING: ${outstanding.length + 1} concurrent "${name}" traces have no ` +
+            'explicit `id`. Each has its own span and key, and ends are paired FIFO, ' +
+            'but pass an `id` to pair them exactly.',
+        );
+      }
+      outstanding.push(id);
+      pendingAutoIdsByName.set(name, outstanding);
+    }
+
+    tracesByKey.set(key, { end, request, startTime, span });
+
+    // Keep the span active until endTrace, so work done in between nests inside it.
+    if (span) {
+      bindActive(outerScope, span);
+    }
 
     log('Started trace', name, request);
     return span;
@@ -205,10 +328,17 @@ function resolveParentSpan(parentContext: unknown): Sentry.Span | null {
     '_name' in parentContext &&
     typeof (parentContext as { _name?: unknown })._name === 'string'
   ) {
-    const key = `${(parentContext as { _name: string })._name}:${
-      (parentContext as { _id?: string })._id ?? 'default'
-    }`;
-    return tracesByKey.get(key)?.span ?? null;
+    const parentName = (parentContext as { _name: string })._name;
+    const explicitId = (parentContext as { _id?: string })._id;
+    // Generated ids mean `name:default` no longer exists, so without an explicit id
+    // resolve to the most recently started outstanding trace of that name.
+    const outstanding = pendingAutoIdsByName.get(parentName);
+    const resolvedId =
+      explicitId ?? (outstanding ? outstanding[outstanding.length - 1] : undefined);
+    if (!resolvedId) {
+      return null;
+    }
+    return tracesByKey.get(getTraceKey({ name: parentName, id: resolvedId }))?.span ?? null;
   }
 
   return null;
