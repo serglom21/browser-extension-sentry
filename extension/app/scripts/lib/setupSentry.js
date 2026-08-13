@@ -5,17 +5,19 @@ import { createTransport } from '@sentry/core';
  * Port of the upstream project's `app/scripts/lib/setupSentry.js` (branch `main`), on the
  * pre-upgrade SDK.
  *
- * Two things are deliberately absent, matching their real file:
+ * BUG A is fixed on this branch, by upgrading the SDK — the same change the upstream project made
+ * in the SDK upgrade PR. `propagateTraceparent` is a v10-only option; enabling it lets the SDK
+ * emit the W3C header itself, naming each request's own span, which is why the
+ * hand-rolled `sentry-trace-propagation.ts` could be deleted outright.
  *
- *   1. `propagateTraceparent` — not available. This build is on 8.33.1, where the
- *      option does not exist, which is exactly why BUG A's hand-rolled
- *      `sentry-trace-propagation.ts` had to exist at all.
+ * BUG B is untouched and still fully present:
  *
- *   2. Any `Sentry.flush()` / `Sentry.close()` call, and any
- *      `chrome.runtime.onSuspend` listener — BUG B.2. Confirmed absent from all 760
- *      lines of their real setupSentry.js. `Sentry.flush` *is* exported by 8.33.1;
- *      it was simply never called. When Chrome terminates the MV3 service worker,
- *      anything still batched in the transport is discarded.
+ *   - `shared/lib/trace.ts` still falls back to `getActiveSpan()` (B.1)
+ *   - there is still no `Sentry.flush()` and no `chrome.runtime.onSuspend`
+ *     listener anywhere (B.2)
+ *
+ * That is the point of this branch: the upgrade fixes Bug A's manifestation of the
+ * anti-pattern and does nothing for Bug B's.
  */
 
 export const ENVELOPE_SINK_URL = 'http://localhost:4000/__envelope';
@@ -102,11 +104,17 @@ export function setupSentry() {
     transport: makeTeeTransport,
     tracesSampleRate: 1.0,
     tracePropagationTargets: ['localhost'],
+    /**
+     * BUG A's fix. v10-only. The SDK now emits the W3C `traceparent` itself, derived
+     * from the span belonging to each individual request, so no hand-rolled header —
+     * and no ambient `getActiveSpan()` lookup — is involved.
+     */
+    propagateTraceparent: true,
     integrations: [
       Sentry.dedupeIntegration(),
       Sentry.extraErrorDataIntegration(),
       /**
-       * The extension registers this unconditionally in the background service worker.
+       * the upstream project registers this unconditionally in the background service worker.
        *
        * `self.location` exists in a worker, so the SDK starts a `pageload` idle span
        * for the worker script and binds it as the active span on the worker's shared
@@ -132,7 +140,7 @@ export function setupSentry() {
     ],
   });
 
-  console.log('[repro] Sentry initialised — @sentry/browser 8.33.1 (pre-upgrade)');
+  console.log('[repro] Sentry initialised — @sentry/browser 10.38.0 (Bug A fixed, Bug B live)');
 }
 
 /**
